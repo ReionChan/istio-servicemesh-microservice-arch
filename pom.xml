@@ -9,7 +9,7 @@
     <version>1.0</version>
     <packaging>pom</packaging>
     <description>
-        基于『Spring Cloud 框架🍃』编程式👨‍💻‍、非云原生⛔️💭 的骨架🍖
+        基于『Spring Boot + Istio + Kubernetes』云原生️💭 的服务网格骨架🍖
     </description>
 
     <modules>
@@ -18,7 +18,6 @@
         <module>arch-dev-ops</module>
         <module>arch-iam</module>
         <module>arch-starter-infrastructure</module>
-        <module>arch-gateway</module>
     </modules>
 
     <properties>
@@ -53,12 +52,13 @@
         <spring.cloud.version>2023.0.1</spring.cloud.version>
         <spring.boot.version>3.2.4</spring.boot.version>
         <spring.security.version>6.2.4</spring.security.version>
+        <spring.security.rsa.version>1.1.3</spring.security.rsa.version>
         <spring.cloud.alibaba.version>2023.0.1.0</spring.cloud.alibaba.version>
         <opentelemetry.bom.version>1.38.0</opentelemetry.bom.version>
         <opentelemetry.instrumentation.bom.version>2.4.0</opentelemetry.instrumentation.bom.version>
 
+        <feign.version>13.2.1</feign.version>
         <h2.version>2.2.224</h2.version>
-
         <swagger.version>2.2.21</swagger.version>
         <springdoc.openapi.version>2.5.0</springdoc.openapi.version>
     </properties>
@@ -83,18 +83,16 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>org.springframework.cloud</groupId>
-                <artifactId>spring-cloud-dependencies</artifactId>
-                <version>${spring.cloud.version}</version>
-                <type>pom</type>
-                <scope>import</scope>
-            </dependency>
-            <dependency>
                 <groupId>org.springframework.security</groupId>
                 <artifactId>spring-security-bom</artifactId>
                 <version>${spring.security.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.security</groupId>
+                <artifactId>spring-security-rsa</artifactId>
+                <version>${spring.security.rsa.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
@@ -104,9 +102,9 @@
                 <scope>import</scope>
             </dependency>
             <dependency>
-                <groupId>com.alibaba.cloud</groupId>
-                <artifactId>spring-cloud-alibaba-dependencies</artifactId>
-                <version>${spring.cloud.alibaba.version}</version>
+                <groupId>io.github.openfeign</groupId>
+                <artifactId>parent</artifactId>
+                <version>${feign.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>

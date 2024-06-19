@@ -6,7 +6,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingClass;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.annotation.web.configurers.HeadersConfigurer;
@@ -28,8 +27,7 @@ import static org.springframework.security.config.Customizer.withDefaults;
 @Configuration
 // Arch-IAM 授权认证中心自行配置
 @ConditionalOnMissingClass({
-    "org.springframework.security.oauth2.server.authorization.OAuth2Authorization",
-    "org.springframework.cloud.gateway.config.GatewayAutoConfiguration"})
+    "org.springframework.security.oauth2.server.authorization.OAuth2Authorization"})
 public class OAuth2ClientResourceSecurityConfiguration {
 
     @SuppressWarnings("SpringJavaInjectionPointsAutowiringInspection")
@@ -50,10 +48,7 @@ public class OAuth2ClientResourceSecurityConfiguration {
                 .exceptionHandling(exh -> exh
                     .accessDeniedHandler(GlobalExceptionHandler::handleAuthException)
                     .authenticationEntryPoint(GlobalExceptionHandler::handleAuthException))
-                .authorizeHttpRequests(httpReq ->
-                    httpReq.requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**",
-                        "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
-                    .anyRequest().authenticated());
+                .authorizeHttpRequests(httpReq -> httpReq.anyRequest().permitAll());
         return http.build();
     }
 

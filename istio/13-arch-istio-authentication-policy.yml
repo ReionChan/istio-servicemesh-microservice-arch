@@ -1,0 +1,33 @@
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: "peer-authentication"
+  namespace: arch-namespace
+spec:
+  mtls:
+    mode: STRICT
+
+---
+
+apiVersion: security.istio.io/v1
+kind: RequestAuthentication
+metadata:
+  name: "jwt-authentication"
+  namespace: arch-namespace
+spec:
+  jwtRules:
+    - issuer: "http://arch-gateway-istio:9000/arch-iam"
+      # arch-gateway-istio 测试未获公网域名，使用集群内部访问域名 (此方式可以因为服务器先后关系导致无法获取，改用固定密钥方式)
+      #jwksUri: "http://arch-gateway-istio.arch-namespace.svc.cluster.local:9000/arch-iam/oauth2/jwks"
+      jwks: |
+        {
+          "keys": [
+            {
+              "kty": "RSA",
+              "e": "AQAB",
+              "kid": "arch-istio-jwt-kid",
+              "n": "xjUqS-9sWZFCVPgzC8VgaAE0ULMURfKfxRSX0UGbT9U1FjCK9L090njQDwKYzPIj6WDdOT55YE3NFyeEc-PKJeCroYv19rUL7mPhR910gQ9AZ_fA1-fumJ8D0nN-6I5qB6eFmYvztW3xw-pEbRMTtAU_gOjHi9HOeesH7epb1yV2_x3CLnIwdEIZlVkNKWWI55P5CV5yFM1ecQwcG4BXFSIYVLgJ6ZqHefKbfSlhOkdbch5FvZApmuXIHdbTJ26ruyFIfJ51Tk0Feqil0VvSvJ-NKokyl9TM2SHoXzX-QnzVan2gfmJy1IPKKmnU2TLHB4rkndtSeb3i4UNcAJ60SQ8nN1a_3tiAqjS7RDWee2G0B9Kuj5lvs7FtpW6cuIeXSHAVlfOlN3fvAtXXhe4RdqC0KlGit-lYrTTD_Olefe_fN0OL9G4V7zdY3n6rgBfDo918Sv9NXtr0y1h_87HKPBGn00oUwiOsG7C777ysmwFXucl3cRWsCMe_DfLOrX5uzOzkizt_A4V3XWmbvhTKfaFD2htwFzjc-gkTvDztm6yAJjKh9aZk8EbPzr-6xOLHQpVGpXmtOz1fRDwGxjLmD9rtpflINcJKFGGdiKGMsUomVTZsMOYYMYpLr5WSxuUWnQHEsz2yHLCZND1TfAp2sFXMgwC6NqfNUcw1jcsBUyE"
+            }
+          ]
+        }
+      forwardOriginalToken: true

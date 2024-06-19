@@ -1,0 +1,100 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: arch-gateway
+  namespace: arch-namespace
+  labels:
+    istio-injection: enabled
+spec:
+  gatewayClassName: istio
+  listeners:
+  - name: http
+    port: 9000
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: Same
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: arch-route
+  namespace: arch-namespace
+spec:
+  parentRefs:
+  - name: arch-gateway
+    namespace: arch-namespace
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: "/api-docs"
+    filters:
+      - type: RequestRedirect
+        requestRedirect:
+          path:
+            type: ReplaceFullPath
+            replaceFullPath: "/arch-iam/swagger-ui/index.html"
+
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/v3/api-docs/arch-iam"
+    backendRefs:
+      - name: arch-iam
+        port: 9090
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/arch-iam"
+    filters:
+      - type: URLRewrite
+        urlRewrite:
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: "/"
+    backendRefs:
+      - name: arch-iam
+        port: 9090
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/v3/api-docs/arch-users"
+    backendRefs:
+      - name: arch-users
+        port: 8081
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/arch-users"
+    filters:
+      - type: URLRewrite
+        urlRewrite:
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: "/"
+    backendRefs:
+      - name: arch-users
+        port: 8081
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/v3/api-docs/arch-app"
+    backendRefs:
+      - name: arch-app
+        port: 8080
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/arch-app"
+    filters:
+      - type: URLRewrite
+        urlRewrite:
+          path:
+            type: ReplacePrefixMatch
+            replacePrefixMatch: "/"
+    backendRefs:
+      - name: arch-app
+        port: 8080

@@ -3,7 +3,7 @@ package io.github.reionchan;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
-import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * @author Reion
@@ -11,7 +11,8 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
  **/
 @SpringBootApplication
 @EnableJpaRepositories
-@EnableMethodSecurity
+//@EnableMethodSecurity
+@EnableScheduling
 public class UserBootstrap {
     public static void main(String[] args) {
         SpringApplication.run(UserBootstrap.class, args);

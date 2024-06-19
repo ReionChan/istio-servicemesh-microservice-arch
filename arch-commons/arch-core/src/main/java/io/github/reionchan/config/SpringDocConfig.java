@@ -128,7 +128,7 @@ public class SpringDocConfig {
             .addSecurityItem(new io.swagger.v3.oas.models.security.SecurityRequirement().addList("security_auth"))
             .info(new Info()
                 .title("Arch 微服务架构")
-                .description("基于『Spring Cloud 框架\uD83C\uDF43』编程式\uD83D\uDC68\u200D\uD83D\uDCBB\u200D、非云原生⛔\uFE0F\uD83D\uDCAD 的骨架\uD83C\uDF56")
+                .description("基于『Spring Boot + Istio + Kubernetes』云原生\uFE0F\uD83D\uDCAD 的服务网格骨架\uD83C\uDF56")
                 .version(appVersion)
                 // 联系信息
                 .contact(new Contact()

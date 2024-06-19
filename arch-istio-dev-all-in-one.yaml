@@ -1,0 +1,1138 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arch-namespace
+  labels:
+    istio-injection: disabled
+spec: {}
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arch-admin-role
+  namespace: arch-namespace
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "services", "configmaps", "pods", "secrets"]
+    verbs: ["get", "list", "watch"]
+
+---
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arch-admin
+  namespace: arch-namespace
+
+---
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arch-admin-binding
+  namespace: arch-namespace
+subjects:
+  - kind: ServiceAccount
+    apiGroup: ""
+    name: arch-admin
+    namespace: arch-namespace
+  - kind: ServiceAccount
+    apiGroup: ""
+    name: default
+    namespace: arch-namespace
+roleRef:
+  kind: Role
+  apiGroup: ""
+  name: arch-admin-role
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  namespace: arch-namespace
+  name: arch-jaeger-deployment
+  labels:
+    app: arch-jaeger-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-jaeger
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-jaeger
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - image: jaegertracing/all-in-one:1.51.0
+          name: jaeger-all-in-one
+          env:
+            - name: spring.cloud.kubernetes.discovery.primary-port-name
+              value: otlp-http
+          ports:
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 16686
+              name: frontend
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-jaeger
+  namespace: arch-namespace
+  labels:
+    app: arch-jaeger
+    primary-port-name: otlp-http
+spec:
+  ports:
+    - port: 4317
+      name: otlp-grpc
+      targetPort: 4317
+    - port: 4318
+      name: otlp-http
+      targetPort: 4318
+    - port: 16686
+      name: frontend
+      targetPort: 16686
+      nodePort: 30001
+  selector:
+    app: arch-jaeger
+  type: NodePort
+  sessionAffinity: None
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-otel-col-configmap
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-otel-col"
+data:
+  collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+    processors:
+      batch:
+    exporters:
+      logging:
+        # basic | normal | detailed
+        verbosity: basic
+      otlp/jaeger:
+        endpoint: "http://arch-jaeger:4317"
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [logging]
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp/jaeger]
+          #exporters: [logging, otlp/jaeger]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [logging]
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-otel-col-deployment
+  name: arch-otel-col-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-otel-col
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-otel-col
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - image: otel/opentelemetry-collector-contrib:0.101.0
+          name: otel-collector
+          command:
+            - "/otelcol-contrib"
+            - "--config=/conf/otel-collector-config.yaml"
+          ports:
+            - containerPort: 4318
+              name: otlp-http
+          volumeMounts:
+            - name: otel-collector-config-vol
+              mountPath: /conf
+          env:
+            - name: spring.cloud.kubernetes.discovery.primary-port-name
+              value: otlp-http
+      volumes:
+        - name: otel-collector-config-vol
+          configMap:
+            name: arch-otel-col-configmap
+            items:
+              - key: collector-config.yaml
+                path: otel-collector-config.yaml
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-otel-col
+  namespace: arch-namespace
+  labels:
+    app: arch-otel-col
+    primary-port-name: otlp-http
+spec:
+  ports:
+    - port: 4318
+      name: otlp-http
+      targetPort: 4318
+    - port: 4317
+      name: otlp-grpc
+      targetPort: 4317
+  selector:
+    app: arch-otel-col
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arch-config-watcher-deployment
+  namespace: arch-namespace
+spec:
+  selector:
+    matchLabels:
+      app: arch-config-watcher
+  template:
+    metadata:
+      labels:
+        app: arch-config-watcher
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - name: arch-config-watcher
+          image: springcloud/spring-cloud-kubernetes-configuration-watcher:3.1.1
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            httpGet:
+              port: 8888
+              path: /actuator/health/readiness
+            initialDelaySeconds: 90
+          livenessProbe:
+            httpGet:
+              port: 8888
+              path: /actuator/health/liveness
+            initialDelaySeconds: 60
+          ports:
+            - containerPort: 8888
+          env:
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_CONFIGURATION_WATCHER
+              value: DEBUG
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_CLIENT_CONFIG_RELOAD
+              value: DEBUG
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_COMMONS_CONFIG_RELOAD
+              value: DEBUG
+            - name: SPRING_CLOUD_KUBERNETES_RELOAD_NAMESPACES_0
+              value: "arch-namespace"
+            - name: SPRING_CLOUD_KUBERNETES_CONFIGURATION_WATCHER_REFRESHDELAY
+              value: "10000"
+            - name: spring.cloud.kubernetes.discovery.primary-port-name
+              value: http
+            - name: user.timezone
+              value: "GMT+08"
+            - name: file.encoding
+              value: "UTF-8"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-config-watcher
+  namespace: arch-namespace
+  labels:
+    app: arch-config-watcher
+    primary-port-name: http
+spec:
+  ports:
+    - name: http
+      port: 8888
+      targetPort: 8888
+  selector:
+    app: arch-config-watcher
+  type: ClusterIP
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-app-common-env-configmap
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-iam, arch-users, arch-app"
+data:
+  spring.output.ansi.enabled: "always"
+  ARCH_VERSION: "1.0_istio"
+  PROFILES: "kubernetes"
+  #  JAVA_OPTS: "-Duser.timezone=GMT+08 -Dfile.encoding=UTF-8 -javaagent:/opentelemetry-javaagent.jar"
+  JAVA_OPTS: "-Duser.timezone=GMT+08 -Dfile.encoding=UTF-8"
+  ARCH_USERS_ADDR: "http://arch-users:8081"
+  ISSUE_ADDR: "http://arch-gateway-istio:9000/arch-iam"
+#  OTEL_EXPORTER_OTLP_ENDPOINT: "http://arch-otel-col:4318"
+#  OTEL_LOGS_EXPORTER: "otlp"
+#  OTEL_CONFIG_FILE: ""
+#  management.otlp.metrics.export.enabled: "true"
+#  management.tracing.enabled: "true"
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-iam"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0aWFt
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-iam"
+data:
+  application-kubernetes.yaml: |-
+    server:
+      port: 9090
+      shutdown: graceful
+    spring:
+      jackson:
+        date-format: yyyy-MM-dd HH:mm:ss
+        time-zone: GMT+8
+        default-property-inclusion: NON_NULL
+      cache:
+        type: caffeine
+        caffeine:
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      security:
+        oauth2:
+          authorizationserver:
+            issuer: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+            client:
+              arch-web:
+                token:
+                  refresh-token-time-to-live: P1D
+                registration:
+                  client-id: arch-web
+                  client-name: arch-web
+                  # secretweb
+                  client-secret: $2a$10$ueyW3xrcU4fV05A0t3lC0.KWmYYEAnQknz3A64vfBr0Rwyc/etHsW
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials, password, refresh_token]
+                  scopes: [ WEB ]
+              arch-app:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: arch-app
+                  client-name: arch-app
+                  # secret
+                  client-secret: $2a$10$XWY/JeWE1SpNQus1mCCJqeh93jrj.hjGDHqJwKLuEEBwv/s5Xylm2
+                  client-authentication-methods: [client_secret_post, client_secret_basic]
+                  authorization-grant-types: [client_credentials]
+                  scopes: [SERVICE]
+              arch-users:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: arch-users
+                  client-name: arch-users
+                  # secretusers
+                  client-secret: $2a$10$2mbgP421pk.kLvbEeyZNKOFhIewdVfg/9dSkIl34ROkfXu./xi0/O
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials ]
+                  scopes: [ SERVICE ]
+              arch-iam:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: ${spring.application.name}
+                  client-name: ${spring.application.name}
+                  # secretiam
+                  client-secret: $2a$10$b7VN/WDZLSiZKmQKwVJBweiOVaJDiT52Jm35KXoVSouFEbtTg7tIe
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials ]
+                  scopes: [ SERVICE ]
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 设置 issuer-uri，让客户端启动时像此授权中心动态获取 OAuth2 和 OIDC 周知端点 URL
+                #issuer-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+                
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework: info
+        feign: debug
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-iam
+      show-oauth2-endpoints: true
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-iam-deployment
+  name: arch-iam-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-iam
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-iam
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - image: docker.io/reion78/arch-iam:1.0_istio
+          name: arch-iam
+          ports:
+            - containerPort: 9090
+              name: http
+          readinessProbe:
+            httpGet:
+              port: 9090
+              path: /actuator/health/readiness
+            initialDelaySeconds: 90
+          livenessProbe:
+            httpGet:
+              port: 9090
+              path: /actuator/health/liveness
+            initialDelaySeconds: 60
+          # 优雅停机
+          lifecycle:
+            preStop:
+              exec:
+                command: [ "sh", "-c", "sleep 10" ]
+          # 外部配置
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: arch-iam
+            - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+              valueFrom:
+                secretKeyRef:
+                  name: arch-iam
+                  key: OAUTH2_CLIENT_SECRET
+          envFrom:
+            - configMapRef:
+                name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-iam
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    app: arch-iam
+    primary-port-name: http
+spec:
+  ports:
+    - port: 9090
+      name: http
+      targetPort: 9090
+  selector:
+    app: arch-iam
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-users"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0dXNlcnM=
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-users"
+data:
+  application-kubernetes.yml: |-
+    server:
+      port: 8081
+      shutdown: graceful
+    spring:
+      jackson:
+        # 日期格式
+        date-format: yyyy-MM-dd HH:mm:ss
+        # 时区
+        time-zone: GMT+8
+        # 忽略 null 的属性值
+        default-property-inclusion: NON_NULL
+      # 缓存配置
+      cache:
+        # 启用自动化装配的 caffeine 本地缓存
+        type: caffeine
+        caffeine:
+          # 默认容量为 128 最大 10000 且缓存过期时间 30s 的本地缓存
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      # 调度器线程池
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      # 数据源配置
+      datasource:
+        # 使用 hikari 连接池的数据源配置
+        hikari:
+          jdbc-url: jdbc:h2:mem:test
+          username: sa
+          password: sa
+          driver-class-name: org.h2.Driver
+      # 设置使用内嵌数据库时，执行表结构创建及数据插入
+      sql:
+        init:
+          # 指定使用嵌入式数据库时，才执行 DDL DML
+          mode: EMBEDDED
+          # 指定 DDL 路径
+          schemaLocations: classpath:/META-INF/sql/schema.sql
+          # 指定 DML 路径
+          dataLocations: classpath:/META-INF/sql/data.sql
+      
+      # 打开 H2 数据库网页版管理页面，登录地址 localhost:8081/h2
+      # 注意：需要将此配置的路径从 Security 权限验证中排除
+      h2:
+        console:
+          enabled: true
+          path: /h2
+          settings:
+            # 是否允许其他主机访问
+            webAllowOthers: false
+            # 密码如设置需 128 位
+            #web-admin-password: admin  
+      # JPA 设置
+      jpa:
+        # 设置数据平台方言
+        database-platform: org.hibernate.dialect.H2Dialect
+        show-sql: true
+        hibernate:
+          ddl-auto: none
+      security:
+        oauth2:
+          # 客户端
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 设置 issuer-uri，让客户端启动时像此授权中心动态获取 OAuth2 和 OIDC 周知端点 URL
+                #issuer-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+                
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          # 资源服务器
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    
+    # 日志配置
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework.security: info
+        io.github.reionchan.rpc.feign: debug
+    
+    # API 文档
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-users
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    
+    # 展示指标端点
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-users-deployment
+  name: arch-users-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-users
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-users
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - image: docker.io/reion78/arch-users:1.0_istio
+          name: arch-users
+          ports:
+            - containerPort: 8081
+              name: http
+          readinessProbe:
+            httpGet:
+              port: 8081
+              path: /actuator/health/readiness
+            initialDelaySeconds: 90
+          livenessProbe:
+            httpGet:
+              port: 8081
+              path: /actuator/health/liveness
+            initialDelaySeconds: 60
+          # 优雅停机
+          lifecycle:
+            preStop:
+              exec:
+                command: [ "sh", "-c", "sleep 10" ]
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: arch-users
+            - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+              valueFrom:
+                secretKeyRef:
+                  name: arch-users
+                  key: OAUTH2_CLIENT_SECRET
+          envFrom:
+            - configMapRef:
+                name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-users
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    app: arch-users
+    primary-port-name: http
+spec:
+  ports:
+    - port: 8081
+      name: http
+      targetPort: 8081
+  selector:
+    app: arch-users
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-app"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-app"
+data:
+  application-kubernetes.yml: |-
+    server:
+      port: 8080
+      shutdown: graceful
+    spring:
+      jackson:
+        # 日期格式
+        date-format: yyyy-MM-dd HH:mm:ss
+        # 时区
+        time-zone: GMT+8
+        # 忽略 null 的属性值
+        default-property-inclusion: NON_NULL
+      # 缓存配置
+      cache:
+        # 启用自动化装配的 caffeine 本地缓存
+        type: caffeine
+        caffeine:
+          # 默认容量为 128 最大 10000 且缓存过期时间 30s 的本地缓存
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      # 调度器线程池
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      security:
+        oauth2:
+          # 客户端
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          # 资源服务器
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    
+    # 日志配置
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework.security: info
+        io.github.reionchan.rpc.feign: debug
+    
+    # API 文档
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-app
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    
+    # 展示指标端点
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-app-deployment
+  name: arch-app-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-app
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-app
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - image: docker.io/reion78/arch-app:1.0_istio
+          name: arch-app
+          ports:
+            - containerPort: 8080
+              name: http
+          # 保活探针
+          readinessProbe:
+            httpGet:
+              port: 8080
+              path: /actuator/health/readiness
+            initialDelaySeconds: 90
+          livenessProbe:
+            httpGet:
+              port: 8080
+              path: /actuator/health/liveness
+            initialDelaySeconds: 60
+          # 优雅停机
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: arch-app
+            - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+              valueFrom:
+                secretKeyRef:
+                  name: arch-app
+                  key: OAUTH2_CLIENT_SECRET
+          envFrom:
+            - configMapRef:
+                name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-app
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    app: arch-app
+    primary-port-name: http
+spec:
+  ports:
+    - port: 8080
+      name: http
+      targetPort: 8080
+  selector:
+    app: arch-app
+  type: ClusterIP
+  sessionAffinity: None
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cacerts
+  namespace: istio-system
+data:
+  ca-cert.pem: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUZTekNDQXpPZ0F3SUJBZ0lKQUtDRjFxZFVjQjJ3TUEwR0NTcUdTSWIzRFFFQkN3VUFNQ0l4RGpBTUJnTlYKQkFvTUJVbHpkR2x2TVJBd0RnWURWUVFEREFkU2IyOTBJRU5CTUI0WERUSTBNRFl5TkRBeU5ETXlOMW9YRFRNMApNRFl5TWpBeU5ETXlOMW93UFRFT01Bd0dBMVVFQ2d3RlNYTjBhVzh4R0RBV0JnTlZCQU1NRDBsdWRHVnliV1ZrCmFXRjBaU0JEUVRFUk1BOEdBMVVFQnd3SWJXbHVhV3QxWW1Vd2dnSWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUMKRHdBd2dnSUtBb0lDQVFER05TcEw3Mnhaa1VKVStETUx4V0JvQVRSUXN4UkY4cC9GRkpmUlFadFAxVFVXTUlyMAp2VDNTZU5BUEFwak04aVBwWU4wNVBubGdUYzBYSjRSejQ4b2w0S3VoaS9YMnRRdnVZK0ZIM1hTQkQwQm45OERYCjUrNllud1BTYzM3b2ptb0hwNFdaaS9PMWJmSEQ2a1J0RXhPMEJUK0E2TWVMMGM1NTZ3ZnQ2bHZYSlhiL0hjSXUKY2pCMFFobVZXUTBwWllqbmsva0pYbklVelY1eERCd2JnRmNWSWhoVXVBbnBtb2Q1OHB0OUtXRTZSMXR5SGtXOQprQ21hNWNnZDF0TW5icXU3SVVoOG5uVk9UUVY2cUtYUlc5SzhuNDBxaVRLWDFNelpJZWhmTmY1Q2ZOVnFmYUIrClluTFVnOG9xYWRUWk1zY0hpdVNkMjFKNXZlTGhRMXdBbnJSSkR5YzNWci9lMklDcU5MdEVOWjU3WWJRSDBxNlAKbVcrenNXMmxicHk0aDVkSWNCV1Y4NlUzZCs4QzFkZUY3aEYyb0xRcVVhSzM2Vml0Tk1QODZWNTk3OTgzUTR2MApiaFh2TjFqZWZxdUFGOE9qM1h4Sy8wMWUydlRMV0gvenNjbzhFYWZUU2hUQ0k2d2JzTHZ2dkt5YkFWZTV5WGR4CkZhd0l4NzhOOHM2dGZtN003T1NMTzM4RGhYZGRhWnUrRk1wOW9VUGFHM0FYT056NkNSTzhQTzJicklBbU1xSDEKcG1Ud1JzL092N3JFNHNkQ2xVYWxlYTA3UFY5RVBBYkdNdVlQMnUybCtVZzF3a29VWVoySW9ZeXhTaVpWTm13dwo1aGd4aWt1dmxaTEc1UmFkQWNTelBiSWNzSmswUFZOOENuYXdWY3lEQUxvMnA4MVJ6RFdOeXdGVElRSURBUUFCCm8ya3daekFkQmdOVkhRNEVGZ1FVOGYxWkJrUEEzQ0JsZVpGNkxuVlpwZDJ2TW9Nd0VnWURWUjBUQVFIL0JBZ3cKQmdFQi93SUJBREFPQmdOVkhROEJBZjhFQkFNQ0F1UXdJZ1lEVlIwUkJCc3dHWUlYYVhOMGFXOWtMbWx6ZEdsdgpMWE41YzNSbGJTNXpkbU13RFFZSktvWklodmNOQVFFTEJRQURnZ0lCQU1jY2lscm1HaHlhNWg2WndPbWtCTmg4CktRSFFOVDdXUTN5SlhEWExlcHNGcnpXR0RUdldXR0c4Q1EzZU9qUXhIdTEwVG95bXI1UTd5ejFGNUJHdHlOV2gKRmhFN3ZEMU1JVXUrOVgrMWVHT2FibmJWTkNnN1N4MytFSDhsSGRWenZQVm5IdjcvZGhyUHVoemFtWXJIYmJJdwp2b0h0SWpMTnhPRU9IQmN6cFlNcmo4VjhiWFAxL3NyVUtqMFB2T3NZZTFiSHg4dzkvWlBXQStza2RKM2JmU2pQCkZiTGxWTm55cnJVS1M1ekdrUTRGbEg2eUp2MmIwU3Zrd2lNVktpRzNFN1ROTmQ2b01KU3YxRDljQ1dXdGF1K0wKc3owMzN6SXZFRFJlY3lvS2hyR09SQWtLZk9DczNueVFTZEZ2SjNvc0psZ1hsZ0dueWFvbjlCUXBkL1IrMTV2OAp5QVl3MHllRHZZUk1mWEhwR2JYL1BJT1VCYk4rVlFlSm9aczF0bVFOR2U3N2dPQkJLd290czBKMm1ucFNlSDY1CmJOcGc2SVBFK2tGY0VDaGJlcWFQeUdnWFAycEMyM0h6N2tIT1NkclBxVm84Z3BBbVlyeWZzK1Y1Zk4wcGpnekIKalVJMVQxcCsycTJvYTJyMW9wSmRlOEc5UzRnUm94UUIrZ2xncFIzVGR1Z0V1bXdsUEpJVkNHMncyU3A2UlUvZgpYNVdxR3o5bGRoUlcxVTJLYzZlQnd4QUtKa3BVZWxQQmluL3ErUVhGYmxqZmp5QTJNSzdRMkRMN2wzWUxlWEhNCnNibFhrMmJaU203TXJqZWVBcEpOaHNjQXpDM2ZZQkV3QURBb3JERzd5RFVmNFNHV2s4aXZhR1g5djVkK1Q2K3oKR3MybGtsLzFMeXRCWW05Qm9SeXoKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+  ca-key.pem: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlKSndJQkFBS0NBZ0VBeGpVcVMrOXNXWkZDVlBnekM4VmdhQUUwVUxNVVJmS2Z4UlNYMFVHYlQ5VTFGakNLCjlMMDkwbmpRRHdLWXpQSWo2V0RkT1Q1NVlFM05GeWVFYytQS0plQ3JvWXYxOXJVTDdtUGhSOTEwZ1E5QVovZkEKMStmdW1KOEQwbk4rNkk1cUI2ZUZtWXZ6dFczeHcrcEViUk1UdEFVL2dPakhpOUhPZWVzSDdlcGIxeVYyL3gzQwpMbkl3ZEVJWmxWa05LV1dJNTVQNUNWNXlGTTFlY1F3Y0c0QlhGU0lZVkxnSjZacUhlZktiZlNsaE9rZGJjaDVGCnZaQXBtdVhJSGRiVEoyNnJ1eUZJZko1MVRrMEZlcWlsMFZ2U3ZKK05Lb2t5bDlUTTJTSG9YelgrUW56VmFuMmcKZm1KeTFJUEtLbW5VMlRMSEI0cmtuZHRTZWIzaTRVTmNBSjYwU1E4bk4xYS8zdGlBcWpTN1JEV2VlMkcwQjlLdQpqNWx2czdGdHBXNmN1SWVYU0hBVmxmT2xOM2Z2QXRYWGhlNFJkcUMwS2xHaXQrbFlyVFREL09sZWZlL2ZOME9MCjlHNFY3emRZM242cmdCZkRvOTE4U3Y5Tlh0cjB5MWgvODdIS1BCR24wMG9Vd2lPc0c3Qzc3N3lzbXdGWHVjbDMKY1JXc0NNZS9EZkxPclg1dXpPemtpenQvQTRWM1hXbWJ2aFRLZmFGRDJodHdGempjK2drVHZEenRtNnlBSmpLaAo5YVprOEViUHpyKzZ4T0xIUXBWR3BYbXRPejFmUkR3R3hqTG1EOXJ0cGZsSU5jSktGR0dkaUtHTXNVb21WVFpzCk1PWVlNWXBMcjVXU3h1VVduUUhFc3oyeUhMQ1pORDFUZkFwMnNGWE1nd0M2TnFmTlVjdzFqY3NCVXlFQ0F3RUEKQVFLQ0FnQUtUcGwwZVc3WStZVEpobDZoTGhKbFZpcXlSNTIyUlhlcGQvaXRHUXhLaW52SU81MytQQmtLNk4xbwo2bW1udnErL1l4b2Q3L0cvNEV2WitHUWE0cTJRYXE2Q0tCVVNUemZmbmJJSldxckVTMWErRVZRbDVobXlOaEtzCnp2UzZneTFnV0lYS0JrMFdFakdRVG81Z1hhMlludTArZHR4cG1POXp4NVVSK2kzc2NqWk43ZTQ3SEJVSTlxYjkKN1RPU0E0V3JCVGJlRmRzNDJiVWZpOUdxWEhJcTF5c012TVZITUpINjlYTEFmM1plNFhjUDZDTVlTSGJoWnpHUQoyNnIvVWZIOE9TN2J6Q0d0Z0xQWVBRemlaalAvT3d6TU9YWTREd2pZQWJ0anVCc1F1ZzBmRElsY0NTS1Bpb3JvCnliZ1gwMXdtT0VMTE1xeUhTQ2lVTGp5S2k3WTBQdlBQRFpFdFRwWjlwRThLRHRSYmVwMW1FMStLVDNuSUhhMG8KenZRaW9mRWtVTnpBdlNpOEphN1crSUNlRUQwdnhBTHJsQy9lcGkzMDh1SFB5M2FlTytIdHlObENHVVE2WUR4aQpOMTBLeWVWMWpreFphajR0YWh2YTVrVXRha0hMb0Z2cTNiQUlWYlVxMDQ3RDlZUHIxUnBTbWJOQ0Q4NUJWOGo3CnUzREhpREJEWGc3dnBKQWJQa2JGeGExajE3VVZRT0NWU0xDV01pcG5kNE92MkJjZjFEbnVzVUVtdnNvOEJJSngKZS9SQUtoZnQ3SHE2S1phRDA1ZEpJVXhHSm9MRktKU2JtVnB0eXdpcG5mTDZRUGdYV3BRWThENEhTcURzTWs2WApiVUFJVlBWRkdoM0ZWRERVWTVacnNtdDZPMmxoT3NXNzVLMTJvL25DUXh5eGJSNXRRUUtDQVFFQTZkTUl1a3JICkMxOWFrVlJTcDd1Uk5QaVJpNWxWS0NFemhyTFYzRGo1dGlaUWlVeWd1VkRFM2NVSlVEMkJscytSNU9mNk5pV2IKZTFsRHRKb3FYdG1LWlE2QzB6dk9RTHo1UDVENEFRcUw5R0E1di8xN2lwN3EwYXlvN2piZEtrQUovZmFxbmpOTQpNV1o2cVdDbmVtK2ZUTXo1d0VCUE02UHFGNkpGNTRtU1pvVGZLL0F6bThJZlQvRG11TGlQQ1JXWTZ3d1kzNjI1CjZ1U0lUTWxpZi96WXloSXh5RG9YU3AzZ001b2ZuWHN4bkl4cVYzMjVFRWxjYWlqd1RKZnB4MWhac080ZkN4cVoKd2w4TzJjSXplL1FyYjQ1Tmg1VlBPajZ6MGtuNnZpd3BObUhOL3BKOW1IMW1VbWhUbFBYS28vR3pEaU54UWh1NApZVGQvVExQZFRJSnRWd0tDQVFFQTJRRm0vdjU5K29RbDlwUzgxT3FOdFJSWlgrYUhiOHdncUlmWVJ1YWhoRHpSClNuWG9kdW43dkRGdjlNNW9DRXBPYUtxUTdQVVY5MFJJL0thZDNQZWFhbG94MDRvNEJBSW02Tm0rakJ0aU1KY2kKN0JORGl2SmlsbWcxZkU3U0VKejcxS0N3OXNmRTF0RUJ1YmRESVRJUXFVTkN2UTZXUENZVW5vS3RSVGpkSDczTApCbjJIYjY1N3hHVzFkSTVXVXlZWkpZM1R4RlVUeUlSWEptdHpTM0RFYjRTU09TUDJab1ZaZStPQmxUS2xiVWlxClBTS1F2cXd0WTg0Q3c4SnUxdzF2bWoyMTlPL0cyMkIwendYNzZWTmtBREdiTUI1dHBBVnlxTVlWVGRPUlNlMisKTzNmMXpHZS9wckdJUWFyZFdqcTVxYkQ3VkNhb083MEVBcGI3ZWJNQVJ3S0NBUUFWcUJ3bzFRQTJoM0JtQVg5ZQpWYnNQUXU2SUZYMlRwKytUekVDT2t5QmR4SksxQk1ubUlCcjd4MklqY203c1B2RnVXQ1lPbWRFYXpadTl3SUdvCkkxSDBKakhyeXFCQjByN3JLa3d1SElIMThtdW00cDFzcTJkb1lDdU5WTHVMVEQ4Z3JKWUU3UTlqaS9CVWU4VkgKUzh0Zlc2VE9MNmFtUzhwRXdoempZeFNTTmtCTlc0UU1LeUNuVU5LdHpUcENSeVBRc1dBa1ozek95cmZ0Rk1Idwp4TVIzZ3RQbGphdldsMlRLb3IzRzRrQW9GY0ZMdFROTTFONmdYb1pUTWNiUFZkbUl6NlZFYkFSTndtd25zeHI5Cm9oSGIxVHhORUlFMERkYXQ1WGc1NFBFNFBqck1GMWxXcEZhenowSGVqQjFtcmQ0OXN2NnNkdERQQUVya0djeW4KWjNVbEFvSUJBQWRLanNWZWs2a0pLNlZmVmdEcGFKMSs4NG5QV3htY2lEUmhiQmpsd3VPSWo1ZXE0b2FzVWZMKwp6ajR4ZVRsZUZjaGFnc2dUYkF1RTFkYjNXaktFZDBHL2loRUxnZHBRb0RJT3J1SlNRVGhVdTYybThBd0pITnJrCjRYY3R4czBjR1RJSnZDaHVpZVNWM1RMNlAxMHNLM2NrZFdlWXg5OTVnQlBiWENzSlFCVEM4Y0ZrRWxya1IvQlAKWW90cUJPaUNUVEgvMCsreTFCbFdxUDczZVVZOW9id0Zma3hCTXhRNndzancyZmZEWGQrUUkzZ3VZeUtrOGxsNgpJSW1uVE1ZWkEzanhQZDNlK0pXQ1ppcFdqeUpGMVFSVXBsdzFpWVdMVVZEdVp1VFlpUGNzNzhsYnZIeUR0K0xICjhFWVVrWjlvZmJoLzQ5SHVBcFVQUXNVN2dYT1RXaDBDZ2dFQU5lUkZoQThkV01hMGd1Z0s5cnZFYndJZWhKRDQKeWtxY1dLaFlYaFV0N1lMQkpMdXZ4WmpraVpVT2tnSXdGdVd5REdpa1hlTysyb2R3bGQxVU0rMGVOMnpKTUswTgo0NjFlZlIzczFXS3hKVXFpRWQ1aG5BQzhpSVJpZUhKYmtiU0NtVnhzQ0xPbDdNS0crdXFmSUxLQW4xM2tjMXNICmloYWRDS0piTWoyQnY0QW9oTjFObVpqdmVvVzA1SC9wbTB0S0oydFd3SFV4RVYwbnF5bXRMYWZpOGJNalJGN0kKMlRUM1pzVWxkS1hhQU5Eb3phNWt2dVhmdVRyM2gzODlvankxbCtKeHg2NkVVK2ltRUNRVGRQWTc2UjZSY1duTQpqL1VFZ0lBOHBHRFcrWmF4b3RyVU9pci9QRm1zbjJQMmlNTFk0eWNLTUM0UEcyVXJmcEYrWGp1cTlBPT0KLS0tLS1FTkQgUlNBIFBSSVZBVEUgS0VZLS0tLS0K
+  cert-chain.pem: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUZTekNDQXpPZ0F3SUJBZ0lKQUtDRjFxZFVjQjJ3TUEwR0NTcUdTSWIzRFFFQkN3VUFNQ0l4RGpBTUJnTlYKQkFvTUJVbHpkR2x2TVJBd0RnWURWUVFEREFkU2IyOTBJRU5CTUI0WERUSTBNRFl5TkRBeU5ETXlOMW9YRFRNMApNRFl5TWpBeU5ETXlOMW93UFRFT01Bd0dBMVVFQ2d3RlNYTjBhVzh4R0RBV0JnTlZCQU1NRDBsdWRHVnliV1ZrCmFXRjBaU0JEUVRFUk1BOEdBMVVFQnd3SWJXbHVhV3QxWW1Vd2dnSWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUMKRHdBd2dnSUtBb0lDQVFER05TcEw3Mnhaa1VKVStETUx4V0JvQVRSUXN4UkY4cC9GRkpmUlFadFAxVFVXTUlyMAp2VDNTZU5BUEFwak04aVBwWU4wNVBubGdUYzBYSjRSejQ4b2w0S3VoaS9YMnRRdnVZK0ZIM1hTQkQwQm45OERYCjUrNllud1BTYzM3b2ptb0hwNFdaaS9PMWJmSEQ2a1J0RXhPMEJUK0E2TWVMMGM1NTZ3ZnQ2bHZYSlhiL0hjSXUKY2pCMFFobVZXUTBwWllqbmsva0pYbklVelY1eERCd2JnRmNWSWhoVXVBbnBtb2Q1OHB0OUtXRTZSMXR5SGtXOQprQ21hNWNnZDF0TW5icXU3SVVoOG5uVk9UUVY2cUtYUlc5SzhuNDBxaVRLWDFNelpJZWhmTmY1Q2ZOVnFmYUIrClluTFVnOG9xYWRUWk1zY0hpdVNkMjFKNXZlTGhRMXdBbnJSSkR5YzNWci9lMklDcU5MdEVOWjU3WWJRSDBxNlAKbVcrenNXMmxicHk0aDVkSWNCV1Y4NlUzZCs4QzFkZUY3aEYyb0xRcVVhSzM2Vml0Tk1QODZWNTk3OTgzUTR2MApiaFh2TjFqZWZxdUFGOE9qM1h4Sy8wMWUydlRMV0gvenNjbzhFYWZUU2hUQ0k2d2JzTHZ2dkt5YkFWZTV5WGR4CkZhd0l4NzhOOHM2dGZtN003T1NMTzM4RGhYZGRhWnUrRk1wOW9VUGFHM0FYT056NkNSTzhQTzJicklBbU1xSDEKcG1Ud1JzL092N3JFNHNkQ2xVYWxlYTA3UFY5RVBBYkdNdVlQMnUybCtVZzF3a29VWVoySW9ZeXhTaVpWTm13dwo1aGd4aWt1dmxaTEc1UmFkQWNTelBiSWNzSmswUFZOOENuYXdWY3lEQUxvMnA4MVJ6RFdOeXdGVElRSURBUUFCCm8ya3daekFkQmdOVkhRNEVGZ1FVOGYxWkJrUEEzQ0JsZVpGNkxuVlpwZDJ2TW9Nd0VnWURWUjBUQVFIL0JBZ3cKQmdFQi93SUJBREFPQmdOVkhROEJBZjhFQkFNQ0F1UXdJZ1lEVlIwUkJCc3dHWUlYYVhOMGFXOWtMbWx6ZEdsdgpMWE41YzNSbGJTNXpkbU13RFFZSktvWklodmNOQVFFTEJRQURnZ0lCQU1jY2lscm1HaHlhNWg2WndPbWtCTmg4CktRSFFOVDdXUTN5SlhEWExlcHNGcnpXR0RUdldXR0c4Q1EzZU9qUXhIdTEwVG95bXI1UTd5ejFGNUJHdHlOV2gKRmhFN3ZEMU1JVXUrOVgrMWVHT2FibmJWTkNnN1N4MytFSDhsSGRWenZQVm5IdjcvZGhyUHVoemFtWXJIYmJJdwp2b0h0SWpMTnhPRU9IQmN6cFlNcmo4VjhiWFAxL3NyVUtqMFB2T3NZZTFiSHg4dzkvWlBXQStza2RKM2JmU2pQCkZiTGxWTm55cnJVS1M1ekdrUTRGbEg2eUp2MmIwU3Zrd2lNVktpRzNFN1ROTmQ2b01KU3YxRDljQ1dXdGF1K0wKc3owMzN6SXZFRFJlY3lvS2hyR09SQWtLZk9DczNueVFTZEZ2SjNvc0psZ1hsZ0dueWFvbjlCUXBkL1IrMTV2OAp5QVl3MHllRHZZUk1mWEhwR2JYL1BJT1VCYk4rVlFlSm9aczF0bVFOR2U3N2dPQkJLd290czBKMm1ucFNlSDY1CmJOcGc2SVBFK2tGY0VDaGJlcWFQeUdnWFAycEMyM0h6N2tIT1NkclBxVm84Z3BBbVlyeWZzK1Y1Zk4wcGpnekIKalVJMVQxcCsycTJvYTJyMW9wSmRlOEc5UzRnUm94UUIrZ2xncFIzVGR1Z0V1bXdsUEpJVkNHMncyU3A2UlUvZgpYNVdxR3o5bGRoUlcxVTJLYzZlQnd4QUtKa3BVZWxQQmluL3ErUVhGYmxqZmp5QTJNSzdRMkRMN2wzWUxlWEhNCnNibFhrMmJaU203TXJqZWVBcEpOaHNjQXpDM2ZZQkV3QURBb3JERzd5RFVmNFNHV2s4aXZhR1g5djVkK1Q2K3oKR3MybGtsLzFMeXRCWW05Qm9SeXoKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQotLS0tLUJFR0lOIENFUlRJRklDQVRFLS0tLS0KTUlJRkNUQ0NBdkdnQXdJQkFnSUpBUDE0em5qeGRlcEJNQTBHQ1NxR1NJYjNEUUVCQ3dVQU1DSXhEakFNQmdOVgpCQW9NQlVsemRHbHZNUkF3RGdZRFZRUUREQWRTYjI5MElFTkJNQjRYRFRJME1EWXlOREF5TkRFd09Wb1hEVE0wCk1EWXlNakF5TkRFd09Wb3dJakVPTUF3R0ExVUVDZ3dGU1hOMGFXOHhFREFPQmdOVkJBTU1CMUp2YjNRZ1EwRXcKZ2dJaU1BMEdDU3FHU0liM0RRRUJBUVVBQTRJQ0R3QXdnZ0lLQW9JQ0FRRGhSYjNFY1hXYU9qT0tzZitWRnBjUApiQXlNOHQ2b1JpOTNkQjhGZXdGSlBlSE1lRG0vMEM4bXluQnZmRHJVTEZUTnMrUmlaZ2ZsNE4wL0tTbnVVaEc4CjNVbFEyOVplZDhHTlM2WmdHRkVKSzh4cjF1MHllT1haZnJyM1lEYVpPdVBpbGpMZzFCV2Fub0hjQndEejV5ZmUKSkFYMjZqLy93ODN5TncyVHFDU2JLbld3Y25kRWttSW9jZjNGbFI5RFZwU0N0d3Z3cE8zMytFN0h1enlIVFBFTQo5Ukp4NngyT1JqS3MveTFOdndjR2d6emRKcTFhaklqM2xDWUtyM1VWUXJaRVZremtBZ0NnOHBMMnM0Q1ZhTzkyCkVCVmMzb1Bvc1ptTERNcG1SejRQcXR3VU9WaUZIOWljWklsVVZ4RFRDY1FUc2F1VERFTzdOWUFKUnJxUXBTZWEKOWw2VWc0TmRldXE0ZzU1K0t1QUZ5TzE5Z29DOTFMZTFXaUMzREQyUjJvdGxyUXRjMzJSdlhSMXBWcFZSNzk1WgpxOGx2Ym40eFUwMXdJamdoQzRDU1ZYcHdTVi81T29PMk9YYVJUM094bWFYaHpZN1d2QTJLNmJTeERnRGE0bHQ3Ck1TbTZFVDVxcTkrUDhNRjhIV1djakxUUVJ6ekltUjIzY24zRmE0MmhZL0hlNnJjdTczZG5TdG1Gbm1BaEs4MzkKams5NjVmaDJSWVM1dmtLNzNSL1VPaWlQWlBGeDljbFhrYXFwR0xaNnRWalJDOWdHMlUyaFFWNmhhb2lxc3E0Vwo5Nk1CcGFYZDk3ZkljaS9OckVtVzh2MDluZEV6T3NZS2llWG1YTVQyV011ejJuTGpESCtrSTYyM1VxN21YL1pmClJ4eUtPVStIQUgwazAzL1dnRXduT1FJREFRQUJvMEl3UURBZEJnTlZIUTRFRmdRVXNFL2llNnlmVVJabVpOdWoKVXNpYWVsaGVCTzh3RHdZRFZSMFRBUUgvQkFVd0F3RUIvekFPQmdOVkhROEJBZjhFQkFNQ0F1UXdEUVlKS29aSQpodmNOQVFFTEJRQURnZ0lCQUtiNXhpM2RhNnNlZmdrTWdodGl2WUx5MWpQQUQ0Rm95SG9iM1NGelA0ZEI3bHZxCkdja2FYWTB3RTU1NTBaRmRhR1pQdzJOM21kTVNHMm1jR2s3bEx4SmhNektVeFBXTnpZRGxsUE5nSlpsNEJnckIKL0UvV0ZWV1VodFRvVXdrcDFBVGdYeS9jM0wveTc1ZmV1c2JhV2o2QXFlYW9TTk9PbXEzWHozNGh3am1OSnpmcwp2K09WMkx2NHFSaEhRK0IxdUpkclcwYlJPUGJadDgvL2FaZTZFVVVJWHZCRVgxdjlIYzFGWmprdmFVM0E1WDN1Cll0elZuM01ENVBGdUppejV3TTFwMlZwMnJ2ekNKWVlPWlR2ZVR2eTlDUVIxSFRNbTFiSjc5MEdISHpzNzhtekMKN2RETi9TT254WVVNS3FXRGYrNjh5S2s0Wkx2alh2ejI2OElTYTBVamlkRTZFdlhFWUE4UXUwRGRQNE5Pc05xWApYNVFpc3RyVkFiOCsyd2FlRHAzOTR0M3VJd2crb0RyUjU2Y3VyZGVab2Q1UlRxcjVoVStBY1JFUTZNeXdCV3YvCm1KOUMrTWpFRVZmOXRSTjBSeWNETG1SODNpaWkvSGovQ29aOGZ0WUZWZlN6QmcwbkpicmNQYjVHYzBudGp1VHEKZkplc2JRU2xRMWlJaW93ZUVmU1RaSm40TVROSG9wV2IvNzlOWEZoOG9ka0ZCbDFzQm9CYzZjQ2hKdHlCVzJxbwpSbDJMWkdlb25YVVFWb0h2L1dxb0pTempCNy9MWU02VWphSGRMWlU3L2MwRUI2TkxOWjcvQUZUSCtYOU9ReS9qClBtSGdYQWxWTFQzMFBjNXFrM3NFOXUvdWRKREJLL3hBRWlLdzA2RitiZjI1RXl6cURHcHVMQnp1OGtJYwotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg==
+  root-cert.pem: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUZDVENDQXZHZ0F3SUJBZ0lKQVAxNHpuanhkZXBCTUEwR0NTcUdTSWIzRFFFQkN3VUFNQ0l4RGpBTUJnTlYKQkFvTUJVbHpkR2x2TVJBd0RnWURWUVFEREFkU2IyOTBJRU5CTUI0WERUSTBNRFl5TkRBeU5ERXdPVm9YRFRNMApNRFl5TWpBeU5ERXdPVm93SWpFT01Bd0dBMVVFQ2d3RlNYTjBhVzh4RURBT0JnTlZCQU1NQjFKdmIzUWdRMEV3CmdnSWlNQTBHQ1NxR1NJYjNEUUVCQVFVQUE0SUNEd0F3Z2dJS0FvSUNBUURoUmIzRWNYV2FPak9Lc2YrVkZwY1AKYkF5TTh0Nm9SaTkzZEI4RmV3RkpQZUhNZURtLzBDOG15bkJ2ZkRyVUxGVE5zK1JpWmdmbDROMC9LU251VWhHOAozVWxRMjlaZWQ4R05TNlpnR0ZFSks4eHIxdTB5ZU9YWmZycjNZRGFaT3VQaWxqTGcxQldhbm9IY0J3RHo1eWZlCkpBWDI2ai8vdzgzeU53MlRxQ1NiS25Xd2NuZEVrbUlvY2YzRmxSOURWcFNDdHd2d3BPMzMrRTdIdXp5SFRQRU0KOVJKeDZ4Mk9SaktzL3kxTnZ3Y0dnenpkSnExYWpJajNsQ1lLcjNVVlFyWkVWa3prQWdDZzhwTDJzNENWYU85MgpFQlZjM29Qb3NabUxETXBtUno0UHF0d1VPVmlGSDlpY1pJbFVWeERUQ2NRVHNhdVRERU83TllBSlJycVFwU2VhCjlsNlVnNE5kZXVxNGc1NStLdUFGeU8xOWdvQzkxTGUxV2lDM0REMlIyb3RsclF0YzMyUnZYUjFwVnBWUjc5NVoKcThsdmJuNHhVMDF3SWpnaEM0Q1NWWHB3U1YvNU9vTzJPWGFSVDNPeG1hWGh6WTdXdkEySzZiU3hEZ0RhNGx0NwpNU202RVQ1cXE5K1A4TUY4SFdXY2pMVFFSenpJbVIyM2NuM0ZhNDJoWS9IZTZyY3U3M2RuU3RtRm5tQWhLODM5CmprOTY1ZmgyUllTNXZrSzczUi9VT2lpUFpQRng5Y2xYa2FxcEdMWjZ0VmpSQzlnRzJVMmhRVjZoYW9pcXNxNFcKOTZNQnBhWGQ5N2ZJY2kvTnJFbVc4djA5bmRFek9zWUtpZVhtWE1UMldNdXoybkxqREgra0k2MjNVcTdtWC9aZgpSeHlLT1UrSEFIMGswMy9XZ0V3bk9RSURBUUFCbzBJd1FEQWRCZ05WSFE0RUZnUVVzRS9pZTZ5ZlVSWm1aTnVqClVzaWFlbGhlQk84d0R3WURWUjBUQVFIL0JBVXdBd0VCL3pBT0JnTlZIUThCQWY4RUJBTUNBdVF3RFFZSktvWkkKaHZjTkFRRUxCUUFEZ2dJQkFLYjV4aTNkYTZzZWZna01naHRpdllMeTFqUEFENEZveUhvYjNTRnpQNGRCN2x2cQpHY2thWFkwd0U1NTUwWkZkYUdaUHcyTjNtZE1TRzJtY0drN2xMeEpoTXpLVXhQV056WURsbFBOZ0pabDRCZ3JCCi9FL1dGVldVaHRUb1V3a3AxQVRnWHkvYzNML3k3NWZldXNiYVdqNkFxZWFvU05PT21xM1h6MzRod2ptTkp6ZnMKditPVjJMdjRxUmhIUStCMXVKZHJXMGJST1BiWnQ4Ly9hWmU2RVVVSVh2QkVYMXY5SGMxRlpqa3ZhVTNBNVgzdQpZdHpWbjNNRDVQRnVKaXo1d00xcDJWcDJydnpDSllZT1pUdmVUdnk5Q1FSMUhUTW0xYko3OTBHSEh6czc4bXpDCjdkRE4vU09ueFlVTUtxV0RmKzY4eUtrNFpMdmpYdnoyNjhJU2EwVWppZEU2RXZYRVlBOFF1MERkUDROT3NOcVgKWDVRaXN0clZBYjgrMndhZURwMzk0dDN1SXdnK29EclI1NmN1cmRlWm9kNVJUcXI1aFUrQWNSRVE2TXl3Qld2LwptSjlDK01qRUVWZjl0Uk4wUnljRExtUjgzaWlpL0hqL0NvWjhmdFlGVmZTekJnMG5KYnJjUGI1R2MwbnRqdVRxCmZKZXNiUVNsUTFpSWlvd2VFZlNUWkpuNE1UTkhvcFdiLzc5TlhGaDhvZGtGQmwxc0JvQmM2Y0NoSnR5QlcycW8KUmwyTFpHZW9uWFVRVm9Idi9XcW9KU3pqQjcvTFlNNlVqYUhkTFpVNy9jMEVCNk5MTlo3L0FGVEgrWDlPUXkvagpQbUhnWEFsVkxUMzBQYzVxazNzRTl1L3VkSkRCSy94QUVpS3cwNkYrYmYyNUV5enFER3B1TEJ6dThrSWMKLS0tLS1FTkQgQ0VSVElGSUNBVEUtLS0tLQo=
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: arch-gateway
+  namespace: arch-namespace
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      port: 9000
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: arch-route
+  namespace: arch-namespace
+spec:
+  parentRefs:
+    - name: arch-gateway
+      namespace: arch-namespace
+  rules:
+    - matches:
+        - path:
+            type: Exact
+            value: "/api-docs"
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: "/arch-iam/swagger-ui/index.html"
+
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/v3/api-docs/arch-iam"
+      backendRefs:
+        - name: arch-iam
+          port: 9090
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/arch-iam"
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: "/"
+      backendRefs:
+        - name: arch-iam
+          port: 9090
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/v3/api-docs/arch-users"
+      backendRefs:
+        - name: arch-users
+          port: 8081
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/arch-users"
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: "/"
+      backendRefs:
+        - name: arch-users
+          port: 8081
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/v3/api-docs/arch-app"
+      backendRefs:
+        - name: arch-app
+          port: 8080
+    - matches:
+        - path:
+            type: PathPrefix
+            value: "/arch-app"
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: "/"
+      backendRefs:
+        - name: arch-app
+          port: 8080

@@ -16,14 +16,10 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
-import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Random;
-
-import static io.github.reionchan.consts.Role.ADMIN;
-import static io.github.reionchan.consts.Role.USER;
 
 /**
  * @author Reion
@@ -48,12 +44,12 @@ public class PingController {
     }
 
     @GetMapping("/ping")
-    @PreAuthorize("hasAnyRole('" + USER + "','" + ADMIN + "')")
     @Operation(summary = "ping 方法", description = "测试接口",
             requestBody = @io.swagger.v3.oas.annotations.parameters.RequestBody(
                     description = "R 传输对象",
                     content = @Content(mediaType = MediaType.APPLICATION_JSON_VALUE))
     )
+    //@PreAuthorize("hasAnyRole('" + USER + "','" + ADMIN + "')")
     public R<String> ping() throws InterruptedException {
         int sleepTime = random.nextInt(200);
         doWork(sleepTime);

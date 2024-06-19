@@ -1,0 +1,209 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-app"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-app"
+data:
+  application-kubernetes.yml: |-
+    server:
+      port: 8080
+      shutdown: graceful
+    spring:
+      jackson:
+        # 日期格式
+        date-format: yyyy-MM-dd HH:mm:ss
+        # 时区
+        time-zone: GMT+8
+        # 忽略 null 的属性值
+        default-property-inclusion: NON_NULL
+      # 缓存配置
+      cache:
+        # 启用自动化装配的 caffeine 本地缓存
+        type: caffeine
+        caffeine:
+          # 默认容量为 128 最大 10000 且缓存过期时间 30s 的本地缓存
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      # 调度器线程池
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      security:
+        oauth2:
+          # 客户端
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          # 资源服务器
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    
+    # 日志配置
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework.security: info
+        io.github.reionchan.rpc.feign: debug
+    
+    # API 文档
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-app
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    
+    # 展示指标端点
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-app-deployment
+  name: arch-app-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-app
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-app
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+      - image: docker.io/reion78/arch-app:1.0_istio
+        name: arch-app
+        ports:
+          - containerPort: 8080
+            name: http
+        # 保活探针
+        readinessProbe:
+          httpGet:
+            port: 8080
+            path: /actuator/health/readiness
+          initialDelaySeconds: 90
+        livenessProbe:
+          httpGet:
+            port: 8080
+            path: /actuator/health/liveness
+          initialDelaySeconds: 60
+        # 优雅停机
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 10"]
+        volumeMounts:
+          - name: config-volume
+            mountPath: /config
+        env:
+          - name: OTEL_SERVICE_NAME
+            value: arch-app
+          - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+            valueFrom:
+              secretKeyRef:
+                name: arch-app
+                key: OAUTH2_CLIENT_SECRET
+        envFrom:
+          - configMapRef:
+              name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-app
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-app
+  namespace: arch-namespace
+  labels:
+    app: arch-app
+    primary-port-name: http
+spec:
+  ports:
+    - port: 8080
+      name: http
+      targetPort: 8080
+  selector:
+    app: arch-app
+  type: ClusterIP
+  sessionAffinity: None

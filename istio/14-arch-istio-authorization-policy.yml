@@ -1,0 +1,45 @@
+# https://istio.io/latest/zh/docs/ops/common-problems/security-issues/
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-authorization
+  namespace: arch-namespace
+spec:
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        principals: ["cluster.local/ns/arch-namespace/sa/arch-admin"]
+    - source:
+        namespaces: ["arch-namespace"]
+
+  - from:
+    - source:
+        namespaces: ["istio-system"]
+
+  - to:
+    - operation:
+        paths: ["/arch-iam/oauth2/{**}", "/arch-iam/swagger-ui/{**}", "/v3/api-docs/{**}", "/api-docs"]
+
+  - from:
+    - source:
+        requestPrincipals: [ "*" ]
+    to:
+    - operation:
+        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
+        paths:
+          - "/arch-users/user/{**}"
+          - "/arch-app/ping"
+
+  - from:
+    - source:
+        requestPrincipals: ["*"]
+    to:
+    - operation:
+        paths:
+        - "/arch-users/rpc/{**}"
+        - "/arch-iam/rpc/{**}"
+        - "/arch-app/rpc/{**}"
+    when:
+    - key: request.auth.claims[roles]
+      values: ["ADMIN"]

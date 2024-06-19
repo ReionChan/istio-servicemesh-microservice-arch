@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-iam"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0aWFt
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-iam"
+data:
+  application-kubernetes.yaml: |-
+    server:
+      port: 9090
+      shutdown: graceful
+    spring:
+      jackson:
+        date-format: yyyy-MM-dd HH:mm:ss
+        time-zone: GMT+8
+        default-property-inclusion: NON_NULL
+      cache:
+        type: caffeine
+        caffeine:
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      security:
+        oauth2:
+          authorizationserver:
+            issuer: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+            client:
+              arch-web:
+                token:
+                  refresh-token-time-to-live: P1D
+                registration:
+                  client-id: arch-web
+                  client-name: arch-web
+                  # secretweb
+                  client-secret: $2a$10$ueyW3xrcU4fV05A0t3lC0.KWmYYEAnQknz3A64vfBr0Rwyc/etHsW
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials, password, refresh_token]
+                  scopes: [ WEB ]
+              arch-app:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: arch-app
+                  client-name: arch-app
+                  # secret
+                  client-secret: $2a$10$XWY/JeWE1SpNQus1mCCJqeh93jrj.hjGDHqJwKLuEEBwv/s5Xylm2
+                  client-authentication-methods: [client_secret_post, client_secret_basic]
+                  authorization-grant-types: [client_credentials]
+                  scopes: [SERVICE]
+              arch-users:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: arch-users
+                  client-name: arch-users
+                  # secretusers
+                  client-secret: $2a$10$2mbgP421pk.kLvbEeyZNKOFhIewdVfg/9dSkIl34ROkfXu./xi0/O
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials ]
+                  scopes: [ SERVICE ]
+              arch-iam:
+                token:
+                  access-token-time-to-live: P1D
+                registration:
+                  client-id: ${spring.application.name}
+                  client-name: ${spring.application.name}
+                  # secretiam
+                  client-secret: $2a$10$b7VN/WDZLSiZKmQKwVJBweiOVaJDiT52Jm35KXoVSouFEbtTg7tIe
+                  client-authentication-methods: [ client_secret_post, client_secret_basic ]
+                  authorization-grant-types: [ client_credentials ]
+                  scopes: [ SERVICE ]
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 设置 issuer-uri，让客户端启动时像此授权中心动态获取 OAuth2 和 OIDC 周知端点 URL
+                #issuer-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+    
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework: info
+        feign: debug
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-iam
+      show-oauth2-endpoints: true
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-iam-deployment
+  name: arch-iam-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-iam
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-iam
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+      - image: docker.io/reion78/arch-iam:1.0_istio
+        name: arch-iam
+        ports:
+          - containerPort: 9090
+            name: http
+        readinessProbe:
+          httpGet:
+            port: 9090
+            path: /actuator/health/readiness
+          initialDelaySeconds: 90
+        livenessProbe:
+          httpGet:
+            port: 9090
+            path: /actuator/health/liveness
+          initialDelaySeconds: 60
+        # 优雅停机
+        lifecycle:
+          preStop:
+            exec:
+              command: [ "sh", "-c", "sleep 10" ]
+        # 外部配置
+        volumeMounts:
+          - name: config-volume
+            mountPath: /config
+        env:
+          - name: OTEL_SERVICE_NAME
+            value: arch-iam
+          - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+            valueFrom:
+              secretKeyRef:
+                name: arch-iam
+                key: OAUTH2_CLIENT_SECRET
+        envFrom:
+          - configMapRef:
+              name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-iam
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-iam
+  namespace: arch-namespace
+  labels:
+    app: arch-iam
+    primary-port-name: http
+spec:
+  ports:
+    - port: 9090
+      name: http
+      targetPort: 9090
+  selector:
+    app: arch-iam
+  type: ClusterIP
+  sessionAffinity: None

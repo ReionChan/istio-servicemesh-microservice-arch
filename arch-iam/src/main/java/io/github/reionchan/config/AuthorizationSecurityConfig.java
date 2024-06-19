@@ -115,8 +115,7 @@ public class AuthorizationSecurityConfig {
                     .authenticationEntryPoint(GlobalExceptionHandler::handleAuthException))
             .authorizeHttpRequests((authorize) -> authorize
                     .requestMatchers(endpointsMatcher).permitAll()
-                    .requestMatchers("/actuator/health", "/actuator/health/**","/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
-                    .anyRequest().authenticated())
+                    .anyRequest().permitAll())
             .with(serverConfigurer, cfg -> cfg.tokenGenerator(delegatingOAuth2TokenGenerator));
         http.userDetailsService(userDetailsService);
         SecurityFilterChain defaultFilterChain = http.build();
@@ -134,7 +133,7 @@ public class AuthorizationSecurityConfig {
         RSAPrivateKey privateKey = (RSAPrivateKey) keyPair.getPrivate();
         RSAKey rsaKey = new RSAKey.Builder(publicKey)
                 .privateKey(privateKey)
-                .keyID(UUID.randomUUID().toString())
+                .keyID("arch-istio-jwt-kid")
                 .build();
 
         JWKSet jwkSet = new JWKSet(rsaKey);

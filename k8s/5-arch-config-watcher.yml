@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arch-config-watcher-deployment
+  namespace: arch-namespace
+spec:
+  selector:
+    matchLabels:
+      app: arch-config-watcher
+  template:
+    metadata:
+      labels:
+        app: arch-config-watcher
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+        - name: arch-config-watcher
+          image: springcloud/spring-cloud-kubernetes-configuration-watcher:3.1.1
+          imagePullPolicy: IfNotPresent
+          readinessProbe:
+            httpGet:
+              port: 8888
+              path: /actuator/health/readiness
+            initialDelaySeconds: 90
+          livenessProbe:
+            httpGet:
+              port: 8888
+              path: /actuator/health/liveness
+            initialDelaySeconds: 60
+          ports:
+            - containerPort: 8888
+          env:
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_CONFIGURATION_WATCHER
+              value: DEBUG
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_CLIENT_CONFIG_RELOAD
+              value: DEBUG
+            - name: LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_KUBERNETES_COMMONS_CONFIG_RELOAD
+              value: DEBUG
+            - name: SPRING_CLOUD_KUBERNETES_RELOAD_NAMESPACES_0
+              value: "arch-namespace"
+            - name: SPRING_CLOUD_KUBERNETES_CONFIGURATION_WATCHER_REFRESHDELAY
+              value: "10000"
+            - name: spring.cloud.kubernetes.discovery.primary-port-name
+              value: http
+            - name: user.timezone
+              value: "GMT+08"
+            - name: file.encoding
+              value: "UTF-8"
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-config-watcher
+  namespace: arch-namespace
+  labels:
+    app: arch-config-watcher
+    primary-port-name: http
+spec:
+  ports:
+    - name: http
+      port: 8888
+      targetPort: 8888
+  selector:
+    app: arch-config-watcher
+  type: ClusterIP

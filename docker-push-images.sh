@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION=1.0
+VERSION=1.0_istio
 
 BASE=`pwd`
 
@@ -8,12 +8,6 @@ BASE=`pwd`
 
 echo ''
 echo $BASE
-echo ''
-
-echo '--------------------------'
-echo 'ARCH-GATEWAY BUILD'
-echo '--------------------------'
-docker tag arch-gateway:$VERSION $DOCKER_NAME/arch-gateway:$VERSION
 echo ''
 
 echo '--------------------------'
@@ -38,7 +32,6 @@ echo ''
 docker images
 sleep 5
 
-docker push $DOCKER_NAME/arch-gateway:$VERSION
 docker push $DOCKER_NAME/arch-users:$VERSION
 docker push $DOCKER_NAME/arch-app:$VERSION
 docker push $DOCKER_NAME/arch-iam:$VERSION

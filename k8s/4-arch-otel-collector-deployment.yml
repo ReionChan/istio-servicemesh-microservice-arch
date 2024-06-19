@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-otel-col-configmap
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-otel-col"
+data:
+  collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          http:
+    processors:
+      batch:
+    exporters:
+      logging:
+        # basic | normal | detailed
+        verbosity: basic
+      otlp/jaeger:
+        endpoint: "http://arch-jaeger:4317"
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [logging]
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp/jaeger]
+          #exporters: [logging, otlp/jaeger]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [logging]
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-otel-col-deployment
+  name: arch-otel-col-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-otel-col
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-otel-col
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+      - image: otel/opentelemetry-collector-contrib:0.101.0
+        name: otel-collector
+        command:
+          - "/otelcol-contrib"
+          - "--config=/conf/otel-collector-config.yaml"
+        ports:
+          - containerPort: 4318
+            name: otlp-http
+        volumeMounts:
+          - name: otel-collector-config-vol
+            mountPath: /conf
+        env:
+          - name: spring.cloud.kubernetes.discovery.primary-port-name
+            value: otlp-http
+      volumes:
+        - name: otel-collector-config-vol
+          configMap:
+            name: arch-otel-col-configmap
+            items:
+              - key: collector-config.yaml
+                path: otel-collector-config.yaml
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-otel-col
+  namespace: arch-namespace
+  labels:
+    app: arch-otel-col
+    primary-port-name: otlp-http
+spec:
+  ports:
+    - port: 4318
+      name: otlp-http
+      targetPort: 4318
+    - port: 4317
+      name: otlp-grpc
+      targetPort: 4317
+  selector:
+    app: arch-otel-col
+  type: ClusterIP
+  sessionAffinity: None

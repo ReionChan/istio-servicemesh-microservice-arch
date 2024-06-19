@@ -1,0 +1,247 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.secret: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-users"
+data:
+  OAUTH2_CLIENT_SECRET: c2VjcmV0dXNlcnM=
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    spring.cloud.kubernetes.config: "true"
+  annotations:
+    spring.cloud.kubernetes.configmap.apps: "arch-users"
+data:
+  application-kubernetes.yml: |-
+    server:
+      port: 8081
+      shutdown: graceful
+    spring:
+      jackson:
+        # 日期格式
+        date-format: yyyy-MM-dd HH:mm:ss
+        # 时区
+        time-zone: GMT+8
+        # 忽略 null 的属性值
+        default-property-inclusion: NON_NULL
+      # 缓存配置
+      cache:
+        # 启用自动化装配的 caffeine 本地缓存
+        type: caffeine
+        caffeine:
+          # 默认容量为 128 最大 10000 且缓存过期时间 30s 的本地缓存
+          spec: initialCapacity=128,maximumSize=10000,expireAfterWrite=30s
+      # 调度器线程池
+      task:
+        scheduling:
+          thread-name-prefix: "arch-scheduling-"
+          pool:
+            size: 3
+      # 数据源配置
+      datasource:
+        # 使用 hikari 连接池的数据源配置
+        hikari:
+          jdbc-url: jdbc:h2:mem:test
+          username: sa
+          password: sa
+          driver-class-name: org.h2.Driver
+      # 设置使用内嵌数据库时，执行表结构创建及数据插入
+      sql:
+        init:
+          # 指定使用嵌入式数据库时，才执行 DDL DML
+          mode: EMBEDDED
+          # 指定 DDL 路径
+          schemaLocations: classpath:/META-INF/sql/schema.sql
+          # 指定 DML 路径
+          dataLocations: classpath:/META-INF/sql/data.sql
+    
+      # 打开 H2 数据库网页版管理页面，登录地址 localhost:8081/h2
+      # 注意：需要将此配置的路径从 Security 权限验证中排除
+      h2:
+        console:
+          enabled: true
+          path: /h2
+          settings:
+            # 是否允许其他主机访问
+            webAllowOthers: false
+            # 密码如设置需 128 位
+            #web-admin-password: admin  
+      # JPA 设置
+      jpa:
+        # 设置数据平台方言
+        database-platform: org.hibernate.dialect.H2Dialect
+        show-sql: true
+        hibernate:
+          ddl-auto: none
+      security:
+        oauth2:
+          # 客户端
+          client:
+            registration:
+              ArchIAM:
+                provider: ArchIAM
+                client-id: ${spring.application.name}
+                client-name: ${spring.application.name}
+                authorization-grant-type: client_credentials
+                client-authentication-method: client_secret_basic
+                scope: [ SERVICE ]
+            provider:
+              ArchIAM:
+                # 设置 issuer-uri，让客户端启动时像此授权中心动态获取 OAuth2 和 OIDC 周知端点 URL
+                #issuer-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}
+                
+                # 不使用签发地址进行解析时，手动指定如下四个周知端点 URL
+                authorizationUri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+                token-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+                jwk-set-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/jwks
+                user-info-uri: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/userinfo
+          # 资源服务器
+          resourceserver:
+            jwt:
+              public-key-location: classpath:arch-iam/public.pem
+    
+    # 日志配置
+    logging:
+      pattern:
+        console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(${LOG_LEVEL_PATTERN:-%5p}) %clr(-){faint} %clr([%t]){faint} %clr(%-40logger{39}){cyan}[%line]%clr(:){faint} %m%n${LOG_EXCEPTION_CONVERSION_WORD:%wEx}"
+      level:
+        org.springframework.security: info
+        io.github.reionchan.rpc.feign: debug
+    
+    # API 文档
+    springdoc:
+      version: "${ARCH_VERSION}"
+      api-docs:
+        version: openapi_3_1
+        path: /v3/api-docs/arch-users
+      swagger-ui:
+        urls:
+          - name: arch-users
+            url: /v3/api-docs/arch-users
+          - name: arch-iam
+            url: /v3/api-docs/arch-iam
+          - name: arch-app
+            url: /v3/api-docs/arch-app
+        display-request-duration: true
+        groups-order: DESC
+        operationsSorter: method
+        disable-swagger-default-url: true
+        use-root-path: true
+        oauth:
+          client-id: arch-web
+          client-secret: secretweb
+      oAuthFlow:
+        authorizationUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/authorize
+        tokenUrl: ${ISSUE_ADDR:http://localhost:9000/arch-iam}/oauth2/token
+      show-actuator: false
+      cache:
+        disabled: true
+    
+    # 展示指标端点
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: "*"
+      endpoint:
+        health:
+          probes:
+            enabled: true
+        refresh:
+          enabled: true
+      health:
+        livenessstate:
+          enabled: true
+        readinessstate:
+          enabled: true
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: arch-users-deployment
+  name: arch-users-deployment
+  namespace: arch-namespace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arch-users
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: arch-users
+    spec:
+      serviceAccountName: arch-admin
+      containers:
+      - image: docker.io/reion78/arch-users:1.0_istio
+        name: arch-users
+        ports:
+          - containerPort: 8081
+            name: http
+        readinessProbe:
+          httpGet:
+            port: 8081
+            path: /actuator/health/readiness
+          initialDelaySeconds: 90
+        livenessProbe:
+          httpGet:
+            port: 8081
+            path: /actuator/health/liveness
+          initialDelaySeconds: 60
+        # 优雅停机
+        lifecycle:
+          preStop:
+            exec:
+              command: [ "sh", "-c", "sleep 10" ]
+        volumeMounts:
+          - name: config-volume
+            mountPath: /config
+        env:
+          - name: OTEL_SERVICE_NAME
+            value: arch-users
+          - name: spring.security.oauth2.client.registration.ArchIAM.client-secret
+            valueFrom:
+              secretKeyRef:
+                name: arch-users
+                key: OAUTH2_CLIENT_SECRET
+        envFrom:
+          - configMapRef:
+              name: arch-app-common-env-configmap
+      volumes:
+        - name: config-volume
+          configMap:
+            name: arch-users
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: arch-users
+  namespace: arch-namespace
+  labels:
+    app: arch-users
+    primary-port-name: http
+spec:
+  ports:
+    - port: 8081
+      name: http
+      targetPort: 8081
+  selector:
+    app: arch-users
+  type: ClusterIP
+  sessionAffinity: None
